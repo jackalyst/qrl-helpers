@@ -17,7 +17,7 @@ This repository contains utilities, scripts, and tools aimed at simplifying inte
 ### Node installation (for Ubuntu 24.04)
 
 ```
-curl -sSL https://raw.githubusercontent.com/theqrl-community/node/install.sh | bash
+curl -sSL https://raw.githubusercontent.com/theqrl-community/qrl-helpers/refs/heads/main/node/install.sh | bash
 ```
 
 ## Acknowledgments
