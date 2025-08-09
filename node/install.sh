@@ -1,4 +1,4 @@
-#!/usr/bin/env bash
+#!/bin/bash
 
 # Ask yes/no helper. Default is "n" unless provided otherwise.
 ask_yes_no() {
