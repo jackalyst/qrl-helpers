@@ -42,15 +42,12 @@ fi
 if ! grep -q 'gobrew/current/bin' ~/.bashrc; then
     echo 'export PATH="$HOME/.gobrew/current/bin:$HOME/.gobrew/bin:$PATH"' >> ~/.bashrc
     echo 'export GOPATH="$HOME/.gobrew/current/go"' >> ~/.bashrc
+
+    export PATH="$HOME/.gobrew/current/bin:$HOME/.gobrew/bin:$PATH"
+    export GOPATH="$HOME/.gobrew/current/go"
     echo "Added gobrew settings to ~/.bashrc"
 else
     echo "gobrew settings already in ~/.bashrc"
-fi
-
-# Source .bashrc in this script's environment so subsequent commands can use the updated PATH
-if [ -f "$BASHRC" ]; then
-  # shellcheck source=/dev/null
-  source "$BASHRC" || true
 fi
 
 gobrew use 1.22.12
@@ -72,7 +69,6 @@ git clone --depth 1 https://github.com/theQRL/qrysm.git
 
 cd go-zond/
 make all
-# TODO, pull in more binaries related to staking (or all binaries? /*?)
 cp build/bin/{gzond,clef} ../
 cd ~/zond-testnetv1/
 
@@ -137,6 +133,9 @@ Wants=network-online.target
 Type=simple
 WorkingDirectory=$ZOND_DIR
 ExecStart=$ZOND_DIR/gzond --nat=extip:0.0.0.0 --testnet --http --http.api "web3,net,zond,engine" --datadir=gzonddata --syncmode=full --snapshot=false
+Restart=on-failure
+RestartSec=10
+StandardOutput=journal
 
 [Install]
 WantedBy=default.target
@@ -153,6 +152,9 @@ Wants=network-online.target
 Type=simple
 WorkingDirectory=$ZOND_DIR
 ExecStart=$ZOND_DIR/2-beacon-chain.sh
+Restart=on-failure
+RestartSec=10
+StandardOutput=journal
 
 [Install]
 WantedBy=default.target
