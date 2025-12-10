@@ -1,4 +1,16 @@
 #!/bin/bash
+set -e
+
+# Variables
+SYSTEMD_USER_DIR="$HOME/.config/systemd/user"
+ZOND_DIR="$HOME/zond-testnetv1"
+GOBREW_BIN="$HOME/.gobrew/bin/gobrew"
+
+# Helper Functions
+
+GREEN='\033[0;32m'
+RED='\033[0;31m'
+NC='\033[0m' # No Color
 
 # Ask yes/no helper. Default is "n" unless provided otherwise.
 ask_yes_no() {
@@ -16,87 +28,143 @@ ask_yes_no() {
   done
 }
 
-SYSTEMD_USER_DIR="$HOME/.config/systemd/user"
-mkdir -p $SYSTEMD_USER_DIR
-ZOND_DIR="$HOME/zond-testnetv1"
+# Progress + logging utilities
+LOGFILE="$(mktemp -t zond-install-XXXXXX.log)"
+SPIN='-\|/'
+spinner() {
+  local pid="$1" msg="$2" i=0
+  while kill -0 "$pid" 2>/dev/null; do
+    printf "\r[%c] %s" "${SPIN:i++%4:1}" "$msg"
+    sleep 0.1
+  done
+}
 
-# First, check to make sure this is Ubuntu 24.04, and if it's not, exit the script
+run_step() {
+  local desc="$1"; shift
+  local cmd="$*"
+  # Run command in a subshell, pipe all output to the log
+  ( bash -o pipefail -c "$cmd" >>"$LOGFILE" 2>&1 ) &
+  local pid=$!
+  spinner "$pid" "$desc"
+  wait "$pid"
+  local ec=$?
+  if [ $ec -eq 0 ]; then
+    printf "\r${GREEN}[PASS]${NC} %s\n" "$desc"
+  else
+    printf "\r${GREEN}[FAIL]${NC} %s\n" "$desc"
+    echo "See log for details: $LOGFILE"
+    echo "Last 20 lines:"
+    tail -n 20 "$LOGFILE" | sed 's/^/  /'
+    exit $ec
+  fi
+}
+
+ensure_sudo() {
+  if sudo -n true 2>/dev/null; then
+    return 0
+  fi
+  echo "Sudo privileges are required. You may be prompted for your password."
+  sudo -v || { echo "Sudo authentication failed."; exit 1; }
+}
+
+
+
+# Main Script
+echo "Starting Zond Testnet v1 installation."
+echo "Detailed logs will be written to: $LOGFILE"
+echo "-----------------------------------------------------"
+
+# OS check
+echo -n "Checking system compatibility... "
 if [[ ! -f /etc/os-release ]] || [[ "$(grep '^VERSION_ID=' /etc/os-release | cut -d '"' -f2)" != "24.04" ]] || [[ "$(grep '^ID=' /etc/os-release | cut -d '=' -f2)" != "ubuntu" ]]; then
+    echo -e "${RED}✗ Failed${NC}"
     echo "This script requires Ubuntu 24.04 LTS. Detected: $(grep '^PRETTY_NAME=' /etc/os-release | cut -d '"' -f2)"
     exit 1
+else
+    echo -e "${GREEN}✓ Ubuntu 24.04 detected${NC}"
 fi
 
-# Installing dependencies
-sudo apt update -y
-sudo apt install -y build-essential git curl screen
+# Get sudo up front so spinners won't get stuck on a password prompt
+ensure_sudo
 
-# Check for gobrew first, then install gobrew if it's not installed
+# Prepare directories
+run_step "Create systemd user dir" "mkdir -p '$SYSTEMD_USER_DIR'"
+
+# Refresh apt and install base deps
+run_step "Update apt cache" "sudo apt-get -y update"
+run_step "Install dependencies" "sudo apt-get install -y build-essential git curl screen"
+
 if ! command -v gobrew &> /dev/null; then
-    echo "Installing gobrew..."
-    curl -sL https://raw.githubusercontent.com/kevincobain2000/gobrew/master/git.io.sh | bash
+    run_step "Install gobrew" "curl -sL https://raw.githubusercontent.com/kevincobain2000/gobrew/master/git.io.sh | bash"
 else
-    echo "gobrew is already installed."
+    echo "gobrew is already installed. Skipping."
 fi
 
-# Modify these next two lines so that they're inserted at the end of ~/.bashrc
-if ! grep -q 'gobrew/current/bin' ~/.bashrc; then
-    echo 'export PATH="$HOME/.gobrew/current/bin:$HOME/.gobrew/bin:$PATH"' >> ~/.bashrc
-    echo 'export GOPATH="$HOME/.gobrew/current/go"' >> ~/.bashrc
-
-    export PATH="$HOME/.gobrew/current/bin:$HOME/.gobrew/bin:$PATH"
-    export GOPATH="$HOME/.gobrew/current/go"
-    echo "Added gobrew settings to ~/.bashrc"
-else
-    echo "gobrew settings already in ~/.bashrc"
+# Ensure gobrew PATH for this session and future shells
+if ! grep -q 'gobrew/current/bin' "$HOME/.bashrc" 2>/dev/null; then
+  run_step "Add gobrew PATH to ~/.bashrc" "printf '%s\n' 'export PATH=\"\$HOME/.gobrew/current/bin:\$HOME/.gobrew/bin:\$PATH\"' >> '$HOME/.bashrc'"
+  run_step "Add GOPATH to ~/.bashrc" "printf '%s\n' 'export GOPATH=\"\$HOME/.gobrew/current/go\"' >> '$HOME/.bashrc'"
 fi
 
-gobrew use 1.22.12
+# Export for current shell
+export PATH="$HOME/.gobrew/current/bin:$HOME/.gobrew/bin:$PATH"
+export GOPATH="$HOME/.gobrew/current/go"
 
-# Check to see if this folder is already created and ask the user if they want to delete it's contents and start fresh. If not, exit.
-if [ -d ~/zond-testnetv1 ]; then
-    if ask_yes_no "Directory ~/zond-testnetv1 already exists. Delete contents and continue? [y/N]:"; then
-        rm -rf ~/zond-testnetv1
-    else
-        echo "Exiting as requested."
-        exit 0
-    fi
+# Install specific Go version with gobrew
+run_step "Install Go 1.22.12 via gobrew" "\"$GOBREW_BIN\" use 1.22.12"
+
+# Handle existing install directory
+if [ -d "$ZOND_DIR" ]; then
+  if ask_yes_no "Directory $ZOND_DIR already exists. Delete contents and continue? [y/N]:"; then
+    run_step "Remove existing $ZOND_DIR" "rm -rf '$ZOND_DIR'"
+  else
+    echo "Exiting as requested."
+    exit 0
+  fi
 fi
 
-mkdir -p ~/zond-testnetv1 && cd ~/zond-testnetv1/
+run_step "Create $ZOND_DIR" "mkdir -p '$ZOND_DIR'"
+cd "$ZOND_DIR" || { echo "Failed to change directory to $ZOND_DIR"; exit 1; }
 
-git clone --depth 1 https://github.com/theQRL/go-zond.git
-git clone --depth 1 https://github.com/theQRL/qrysm.git
+run_step "Cloning go-zond repository" "git clone --depth 1 https://github.com/theQRL/go-zond.git"
+run_step "Cloning qrysm repository" "git clone --depth 1 https://github.com/theQRL/qrysm.git"
 
-cd go-zond/
-make all
-cp build/bin/{gzond,clef} ../
-cd ~/zond-testnetv1/
+echo "Building binaries (this may take a few minutes)..."
 
-cd qrysm
-go build -o=../qrysmctl ./cmd/qrysmctl
-go build -o=../beacon-chain ./cmd/beacon-chain
-go build -o=../validator ./cmd/validator
-cd ~/zond-testnetv1/
+# Build Binaries
+cd go-zond/ || { echo "Failed to enter go-zond directory"; exit 1; }
+run_step "  - Building go-zond" "make all"
+run_step "  - Copying gzond binaries" "cp build/bin/{gzond,clef} ../"
+cd ../
 
-wget https://github.com/theQRL/go-zond-metadata/raw/refs/heads/main/testnet/testnetv1/genesis.ssz
-wget https://raw.githubusercontent.com/theQRL/go-zond-metadata/refs/heads/main/testnet/testnetv1/config.yml
+cd qrysm/ || { echo "Failed to enter qrysm directory"; exit 1; }
+run_step "  - Building qrysmctl" "go build -o=../qrysmctl ./cmd/qrysmctl"
+run_step "  - Building beacon-chain" "go build -o=../beacon-chain ./cmd/beacon-chain"
+run_step "  - Building validator" "go build -o=../validator ./cmd/validator"
+cd ../
 
-# Save the gzond command to 1-gzond.sh
-cat > 1-gzond.sh << 'EOF'
+# Download metadata
+run_step "Download genesis.ssz" "cd '$ZOND_DIR' && curl -fsSL -o genesis.ssz https://github.com/theQRL/go-zond-metadata/raw/refs/heads/main/testnet/testnetv1/genesis.ssz"
+run_step "Download config.yml" "cd '$ZOND_DIR' && curl -fsSL -o config.yml https://raw.githubusercontent.com/theQRL/go-zond-metadata/refs/heads/main/testnet/testnetv1/config.yml"
+
+# Verify binaries
+run_step "Verify built binaries" "test -x '$ZOND_DIR/gzond' && test -x '$ZOND_DIR/clef' && test -x '$ZOND_DIR/qrysmctl' && test -x '$ZOND_DIR/beacon-chain' && test -x '$ZOND_DIR/validator'"
+
+# Create helper scripts
+run_step "Create 1-gzond.sh" "cat > '$ZOND_DIR/1-gzond.sh' << 'EOF'
 #!/bin/bash
 ./gzond \
   --nat=extip:0.0.0.0 \
   --testnet \
   --http \
-  --http.api "web3,net,zond,engine" \
+  --http.api \"web3,net,zond,engine\" \
   --datadir=gzonddata console \
   --syncmode=full \
   --snapshot=false
 EOF
-chmod +x 1-gzond.sh
+chmod +x '$ZOND_DIR/1-gzond.sh'"
 
-# Save the beacon-chain command to 2-beacon-chain.sh
-cat > 2-beacon-chain.sh << 'EOF'
+run_step "Create 2-beacon-chain.sh" "cat > '$ZOND_DIR/2-beacon-chain.sh' << 'EOF'
 #!/bin/bash
 ./beacon-chain \
   --datadir=beacondata \
@@ -113,17 +181,17 @@ cat > 2-beacon-chain.sh << 'EOF'
   --minimum-peers-per-subnet=0 \
   --p2p-static-id \
   --suggested-fee-recipient=Z20e526833d2ab5bd20de64cc00f2c2c7a07060bf \
-  --bootstrap-node "enr:-MK4QM50zz3VrN3RgofTTWvFJaZx8fqPrebXtRPrfPma95LABun96pdS48x2vbs3tjjsba6hoTfJP60Jx5g68cjIGjGGAZiJNUY3h2F0dG5ldHOIAAAAAAAAAACEZXRoMpB0w1LqIAAAif__________gmlkgnY0gmlwhC0g6p2Jc2VjcDI1NmsxoQJXCfi0hbGBlSV7exFKsa4iPU41kqSjXvxoTJd9bYwjGohzeW5jbmV0cwCDdGNwgjLIg3VkcIIu4A" \
-  --bootstrap-node "enr:-MK4QKoucVoW4hO3nKFPXj1gyYq5_8T1NCpioRMTeFrOdX3IQk6j11_jeYCJ0r3FysBTv831YcuK1wKXfZJE81go7uWGAZiJNeqGh2F0dG5ldHOIAAAAAAAAAACEZXRoMpB0w1LqIAAAif__________gmlkgnY0gmlwhC1MJ0KJc2VjcDI1NmsxoQPp77MwBxOSTTwLPYUci16GSPW9_6tcK1Dj7yDVh87xvIhzeW5jbmV0cwCDdGNwgjLIg3VkcIIu4A" \
+  --bootstrap-node "enr:-MK4QBUiE0sz67x3RrGbyEKZYnJRLp1gv3UkUEsON18nkisZTM7iV5ACYdZyaWvz1vghvrBO079kf90jHQnOTEn_yf2GAZmls6Ozh2F0dG5ldHOIAAAAAAAAAACEZXRoMpB0w1LqIAAAif__________gmlkgnY0gmlwhC0g6p2Jc2VjcDI1NmsxoQIhBcsnDFoKva4aeNktuAxWb7IxY948okJ1bpv20P_MGYhzeW5jbmV0cwCDdGNwgjLIg3VkcIIu4A" \
+  --bootstrap-node "enr:-MK4QFirz10ntbN32_GOn6B1uZRU5rj6b4bEoP9o4yf_MlrGINIW4nICvCWexO3dHRYJIbIFXfEUQ3c3oHNYd3p_SjWGAZmltUODh2F0dG5ldHOIAAAAAAAAAACEZXRoMpB0w1LqIAAAif__________gmlkgnY0gmlwhC1MJ0KJc2VjcDI1NmsxoQNPBaBuj93C-yFVRC4mWoK315QM9O0SWdf741t3sbPtNIhzeW5jbmV0cwCDdGNwgjLIg3VkcIIu4A" \
   --verbosity debug \
   --log-file beacon.log \
   --log-format text
 EOF
-chmod +x 2-beacon-chain.sh
+chmod +x '$ZOND_DIR/2-beacon-chain.sh'"
 
-# Ask if the user wants a systemd script
+# Optionally create systemd user services
 if ask_yes_no "Do you want to create systemd services for gzond and beacon-chain? [y/N]:"; then
-cat > "$SYSTEMD_USER_DIR/gzond.service" <<EOF
+  run_step "Write gzond.service" "cat > '$SYSTEMD_USER_DIR/gzond.service' <<EOF
 [Unit]
 Description=Execution Engine (gzond)
 After=network-online.target
@@ -132,17 +200,15 @@ Wants=network-online.target
 [Service]
 Type=simple
 WorkingDirectory=$ZOND_DIR
-ExecStart=$ZOND_DIR/gzond --nat=extip:0.0.0.0 --testnet --http --http.api "web3,net,zond,engine" --datadir=gzonddata --syncmode=full --snapshot=false
+ExecStart=$ZOND_DIR/gzond --nat=extip:0.0.0.0 --testnet --http --http.api \"web3,net,zond,engine\" --datadir=gzonddata --syncmode=full --snapshot=false
 Restart=on-failure
 RestartSec=10
 StandardOutput=journal
 
 [Install]
 WantedBy=default.target
-EOF
-
-# beacon chain service uses wrapper script
-cat > "$SYSTEMD_USER_DIR/beacon-chain.service" <<EOF
+EOF"
+  run_step "Write beacon-chain.service" "cat > '$SYSTEMD_USER_DIR/beacon-chain.service' <<EOF
 [Unit]
 Description=Beacon Chain (qrysm)
 After=network-online.target
@@ -158,34 +224,47 @@ StandardOutput=journal
 
 [Install]
 WantedBy=default.target
-EOF
+EOF"
 
-  echo "Reloading systemd --user daemon..."
-  if systemctl --user daemon-reload 2>/dev/null; then
+  # Reload user daemon
+  if systemctl --user daemon-reload >>"$LOGFILE" 2>&1; then
     if ask_yes_no "Enable and start gzond.service and beacon-chain.service now? [y/N]" "n"; then
-      systemctl --user enable --now gzond.service beacon-chain.service
-      echo "Enabled and started services (if your system supports user systemd)."
+      if systemctl --user enable --now gzond.service beacon-chain.service >>"$LOGFILE" 2>&1; then
+        echo "Enabled and started services."
+      else
+        echo "Failed to enable/start user services. See log: $LOGFILE"
+      fi
     else
       echo "You can enable/start them later with:"
       echo "  systemctl --user enable --now gzond.service beacon-chain.service"
     fi
   else
-    echo "Couldn't reload systemd --user daemon. You may need to run the following manually in a user session:"
+    echo "Couldn't reload systemd --user daemon. You may need to run manually:"
     echo "  systemctl --user daemon-reload"
     echo "Then enable/start the services:"
     echo "  systemctl --user enable --now gzond.service beacon-chain.service"
   fi
 
-  if ask_yes_no "Enable user lingering (loginctl enable-linger \$USER) so services can run after reboot without a user login? This requires sudo. [y/N]" "n"; then
-    sudo loginctl enable-linger "$USER"
-    echo "Enabled linger for $USER. Services can now run across reboots when enabled."
+  # Optional lingering
+  if ask_yes_no "Enable user lingering (loginctl enable-linger $USER) so services can run after reboot without a user login? This requires sudo. [y/N]" "n"; then
+    ensure_sudo
+    run_step "Enable linger for $USER" "sudo loginctl enable-linger '$USER'"
   fi
 fi
 
+echo "-----------------------------------------------------"
+echo -e "${GREEN}All done! Files and binaries are in $ZOND_DIR${NC}"
+echo
 echo "All done. Files and binaries are in $ZOND_DIR"
-echo "Start gzond manually with: $ZOND_DIR/1-gzond.sh"
-echo "Start beacon-chain manually with: $ZOND_DIR/2-beacon-chain.sh"
-
-if [ -d "$HOME/.config/systemd/user" ]; then
-  echo "If systemd units were created you can manage them with: systemctl --user (start|stop|status) gzond.service beacon-chain.service"
+echo "Install log saved to: $LOGFILE"
+echo
+echo "To start services manually:"
+echo "  cd $ZOND_DIR"
+echo "  ./1-gzond.sh"
+echo "  ./2-beacon-chain.sh"
+echo
+if [ -d "$SYSTEMD_USER_DIR" ]; then
+  echo "If systemd units were created you can manage them with:"
+  echo "  systemctl --user status gzond.service beacon-chain.service"
+  echo "  systemctl --user (start|stop|restart) gzond.service beacon-chain.service"
 fi
