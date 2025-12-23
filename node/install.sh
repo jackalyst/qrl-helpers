@@ -6,11 +6,16 @@ SYSTEMD_USER_DIR="$HOME/.config/systemd/user"
 ZOND_DIR="$HOME/zond-testnetv1"
 GOBREW_BIN="$HOME/.gobrew/bin/gobrew"
 
-# Helper Functions
+# Minimum requirements
+MIN_CPU_CORES=2
+MIN_RAM_GB=2
+MIN_STORAGE_GB=50
 
+# Helper Functions
 GREEN='\033[0;32m'
 RED='\033[0;31m'
-NC='\033[0m' # No Color
+YELLOW='\033[1;33m'
+NC='\033[0m'
 
 # Ask yes/no helper. Default is "n" unless provided otherwise.
 ask_yes_no() {
@@ -67,14 +72,12 @@ ensure_sudo() {
   sudo -v || { echo "Sudo authentication failed."; exit 1; }
 }
 
-
-
 # Main Script
 echo "Starting Zond Testnet v1 installation."
 echo "Detailed logs will be written to: $LOGFILE"
 echo "-----------------------------------------------------"
 
-# OS check
+# OS & System requirements check
 echo -n "Checking system compatibility... "
 if [[ ! -f /etc/os-release ]] || [[ "$(grep '^VERSION_ID=' /etc/os-release | cut -d '"' -f2)" != "24.04" ]] || [[ "$(grep '^ID=' /etc/os-release | cut -d '=' -f2)" != "ubuntu" ]]; then
     echo -e "${RED}✗ Failed${NC}"
@@ -82,6 +85,66 @@ if [[ ! -f /etc/os-release ]] || [[ "$(grep '^VERSION_ID=' /etc/os-release | cut
     exit 1
 else
     echo -e "${GREEN}✓ Ubuntu 24.04 detected${NC}"
+fi
+
+# Check CPU cores
+CPU_CORES=$(nproc)
+echo "CPU Cores detected: $CPU_CORES"
+
+# Check RAM (in GB, rounded to nearest)
+TOTAL_RAM_KB=$(grep MemTotal /proc/meminfo | awk '{print $2}')
+TOTAL_RAM_GB=$(awk "BEGIN {printf \"%.0f\", $TOTAL_RAM_KB/1024/1024}")
+echo "RAM detected: ${TOTAL_RAM_GB} GB"
+
+# Check available storage
+AVAILABLE_STORAGE_KB=$(df / | tail -1 | awk '{print $4}')
+AVAILABLE_STORAGE_GB=$((AVAILABLE_STORAGE_KB / 1024 / 1024))
+AVAILABLE_STORAGE_GB_PRECISE=$(awk "BEGIN {printf \"%.2f\", $AVAILABLE_STORAGE_KB/1024/1024}")
+echo "Available storage: ${AVAILABLE_STORAGE_GB_PRECISE} GB"
+
+# CPU Check
+if [ "$CPU_CORES" -lt "$MIN_CPU_CORES" ]; then
+    echo -e "${RED}✗ FAIL: Minimum $MIN_CPU_CORES CPU cores required${NC}"
+    CPU_CHECK=false
+else
+    echo -e "${GREEN}✓ PASS: CPU cores requirement met${NC}"
+    CPU_CHECK=true
+fi
+
+# Ram check
+if [ "$TOTAL_RAM_GB" -lt "$MIN_RAM_GB" ]; then
+    echo -e "${RED}✗ FAIL: Minimum $MIN_RAM_GB GB RAM required${NC}"
+    RAM_CHECK=false
+else
+    echo -e "${GREEN}✓ PASS: RAM requirement met${NC}"
+    RAM_CHECK=true
+fi
+
+if [ "$AVAILABLE_STORAGE_GB" -lt "$MIN_STORAGE_GB" ]; then
+    echo -e "${YELLOW}✗ WARNING: Minimum $MIN_STORAGE_GB GB storage recommended${NC}"
+    STORAGE_CHECK=false
+else
+    echo -e "${GREEN}✓ PASS: Storage requirement met${NC}"
+    STORAGE_CHECK=true
+fi
+
+# Final result
+if [ "$CPU_CHECK" = true ] && [ "$RAM_CHECK" = true ]; then
+    if [ "$STORAGE_CHECK" = false ]; then
+        echo -e "${YELLOW}Warning: Low storage space detected!${NC}"
+        if ask_yes_no "Do you want to continue anyway? [y/N]" "n"; then
+            echo -e "${GREEN}Continuing with low storage...${NC}"
+        else
+            echo -e "${RED}Installation aborted due to insufficient storage.${NC}"
+            exit 1
+        fi
+    else
+        echo -e "${GREEN}System meets all requirements!${NC}"
+    fi
+else
+    echo -e "${RED}System does NOT meet minimum requirements!${NC}"
+    echo "CPU and RAM requirements are mandatory."
+    exit 1
 fi
 
 # Get sudo up front so spinners won't get stuck on a password prompt
